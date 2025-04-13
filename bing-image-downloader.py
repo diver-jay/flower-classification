@@ -5,17 +5,29 @@ import random
 
 # 한국 플로리스트가 자주 사용하는 대표 꽃 10종류
 korean_flowers = [
-    "장미", # Rose
-    "튤립", # Tulip
-    "국화", # Chrysanthemum
-    "카네이션", # Carnation
-    "백합", # Lily
-    "프리지아", # Freesia
-    "거베라", # Gerbera
-    "수국", # Hydrangea
-    "작약", # Peony
-    "라넌큘러스" # Ranunculus
+    "玫瑰",  # Rose
+    "郁金香",  # Tulip
+    "菊花",  # Chrysanthemum
+    "康乃馨",  # Carnation
+    "百合",  # Lily
+    "小苍兰",  # Freesia
+    "非洲菊",  # Gerbera
+    "绣球花",  # Hydrangea
+    "牡丹",  # Peony
+    "毛茛"  # Ranunculus
 ]
+# korean_flowers = [
+#     "장미", # Rose
+#     "튤립", # Tulip
+#     "국화", # Chrysanthemum
+#     "카네이션", # Carnation
+#     "백합", # Lily
+#     "프리지아", # Freesia
+#     "거베라", # Gerbera
+#     "수국", # Hydrangea
+#     "작약", # Peony
+#     "라넌큘러스" # Ranunculus
+# ]
 
 # 각 꽃당 최대 다운로드 이미지 수
 max_images_per_flower = 60

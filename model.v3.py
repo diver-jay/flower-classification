@@ -9,11 +9,25 @@ from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, Batc
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau, Callback
-from tensorflow.keras.regularizers import l2
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 import pandas as pd
 import time
+
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    print("GPU 목록:", gpus)
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        # 논리적 GPU 장치 생성
+        tf.config.set_visible_devices(gpus[0], 'GPU')
+        print(f"GPU {gpus[0].name}를 사용합니다.")
+    except RuntimeError as e:
+        print(e)
+else:
+    print("GPU를 찾을 수 없습니다. CPU에서 실행합니다.")
+
 
 # GPU 메모리 증가 방지
 physical_devices = tf.config.list_physical_devices('GPU')
@@ -24,8 +38,8 @@ if physical_devices:
 
 # 경로 설정
 DATA_DIR = "processed_flowers_dataset"
-MODEL_DIR = "flower_model_resnet50_anti_overfitting"
-PLOT_DIR = "training_plots_resnet50_anti_overfitting"
+MODEL_DIR = "flower_model_resnet50_improved"
+PLOT_DIR = "training_plots_resnet50_improved"
 
 # 디렉토리 생성
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -35,8 +49,7 @@ os.makedirs(PLOT_DIR, exist_ok=True)
 IMG_SIZE = 224  # ResNet50의 표준 입력 크기
 BATCH_SIZE = 32
 EPOCHS = 30
-INITIAL_LEARNING_RATE = 0.00005  # 학습률 추가 감소
-WEIGHT_DECAY = 1e-4  # L2 정규화 계수
+INITIAL_LEARNING_RATE = 0.0001  # 학습률 감소
 VALIDATION_SPLIT = 0.2
 
 # 각 배치마다 손실 및 정확도 출력을 위한 커스텀 콜백
@@ -78,16 +91,10 @@ class BatchLossCallback(Callback):
         print(f"에폭 {epoch+1}/{self.params['epochs']} 완료 - 소요 시간: {epoch_time:.2f}초")
         print(f"  훈련 손실: {logs.get('loss'):.4f}, 훈련 정확도: {logs.get('accuracy'):.4f}")
         print(f"  검증 손실: {val_loss:.4f}, 검증 정확도: {val_accuracy:.4f}")
-        
-        # 과적합 확인 (훈련 정확도와 검증 정확도의 차이가 크면 경고)
-        train_acc = logs.get('accuracy')
-        val_acc = logs.get('val_accuracy')
-        if train_acc - val_acc > 0.15:  # 15% 이상 차이나면 과적합 의심
-            print(f"  [경고] 과적합 징후 감지: 훈련 정확도와 검증 정확도의 차이가 {(train_acc - val_acc)*100:.1f}%입니다.")
 
 def create_model(num_classes):
     """
-    과적합 방지를 위해 개선된 ResNet50 기반 전이 학습 모델 생성
+    개선된 ResNet50 기반 전이 학습 모델 생성
     """
     # 사전 훈련된 ResNet50 로드 (가중치는 ImageNet)
     base_model = ResNet50(
@@ -97,48 +104,45 @@ def create_model(num_classes):
     )
     
     # 배치 정규화 레이어의 파라미터 설정
+    # 이렇게 하면 훈련 중에 배치 정규화 통계가 업데이트되지 않음
     for layer in base_model.layers:
         if isinstance(layer, tf.keras.layers.BatchNormalization):
             layer.trainable = False
-        layer.trainable = False  # 모든 기본 모델 레이어를 처음에는 동결
     
-    # 모델 구조 정의 - 강화된 정규화가 적용된 분류 헤드
+    # 모델 구조 정의 - 개선된 분류 헤드
     x = base_model.output
     x = GlobalAveragePooling2D()(x)
     
-    # 첫 번째 Dense 레이어에 L2 정규화 추가, 드롭아웃 비율 증가
+    # 배치 정규화 추가
     x = BatchNormalization()(x)
-    x = Dense(1024, activation='relu', kernel_regularizer=l2(WEIGHT_DECAY))(x)
+    x = Dense(1024, activation='relu')(x)
     x = BatchNormalization()(x)
-    x = Dropout(0.5)(x)  # 드롭아웃 비율 증가
+    x = Dropout(0.3)(x)  # 드롭아웃 비율 감소
     
-    # 두 번째 Dense 레이어에 L2 정규화 추가, 드롭아웃 비율 증가
-    x = Dense(512, activation='relu', kernel_regularizer=l2(WEIGHT_DECAY))(x)
+    x = Dense(512, activation='relu')(x)
     x = BatchNormalization()(x)
-    x = Dropout(0.4)(x)  # 드롭아웃 비율 증가
+    x = Dropout(0.2)(x)  # 드롭아웃 비율 추가 감소
     
-    # 출력 레이어에도 L2 정규화 추가
-    predictions = Dense(num_classes, activation='softmax', kernel_regularizer=l2(WEIGHT_DECAY))(x)
+    predictions = Dense(num_classes, activation='softmax')(x)
     
     model = Model(inputs=base_model.input, outputs=predictions)
     
-    # 기존 모델에서 더 적은 레이어만 동결 해제 (마지막 10개만 학습)
-    for layer in base_model.layers[-10:]:
+    # 기존 모델 일부 레이어 동결 해제 (처음부터 일부 레이어 학습)
+    # ResNet50 마지막 스테이지(stage 5)의 일부를 학습 가능하게 설정
+    for layer in base_model.layers[-20:]:
         layer.trainable = True
     
-    # 학습률 스케줄러 - 낮은 학습률 적용
+    # 학습률 스케줄러 - 초기 학습에 낮은 학습률 사용
     lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
         initial_learning_rate=INITIAL_LEARNING_RATE,
-        decay_steps=500,  # 더 빨리 감소
-        decay_rate=0.85,  # 더 많이 감소
+        decay_steps=1000,
+        decay_rate=0.9,
         staircase=True
     )
     
-    # 모델 컴파일 - weight decay 추가
-    optimizer = Adam(learning_rate=lr_schedule, weight_decay=WEIGHT_DECAY)
-    
+    # 모델 컴파일
     model.compile(
-        optimizer=optimizer,
+        optimizer=Adam(learning_rate=lr_schedule),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
@@ -160,24 +164,14 @@ def unfreeze_model(model, base_model):
     """
     미세 조정을 위해 기본 모델의 더 많은 레이어 훈련 가능하게 설정
     """
-    # 기본 모델의 더 많은 레이어를 훈련 가능하게 설정 (여전히 처음 절반은 동결 유지)
-    total_layers = len(base_model.layers)
-    trainable_layers = total_layers // 4  # 전체의 1/4만 훈련
-    
-    for layer in base_model.layers:
-        layer.trainable = False  # 모든 레이어 우선 동결
-        
-    for layer in base_model.layers[-trainable_layers:]:
-        layer.trainable = True  # 마지막 1/4만 학습 가능하게
+    # 기본 모델의 더 많은 레이어를 훈련 가능하게 설정
+    # ResNet50의 마지막 2개 스테이지(stage 4, 5)를 미세 조정
+    for layer in base_model.layers[-50:]:
+        layer.trainable = True
     
     # 더 낮은 학습률로 다시 컴파일
-    optimizer = Adam(
-        learning_rate=INITIAL_LEARNING_RATE / 5,
-        weight_decay=WEIGHT_DECAY * 2  # 미세 조정 단계에서 weight decay 증가
-    )
-    
     model.compile(
-        optimizer=optimizer,
+        optimizer=Adam(learning_rate=INITIAL_LEARNING_RATE / 10),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
@@ -208,12 +202,6 @@ def plot_training_history(history, filename="training_history.png"):
     ax1.set_ylabel('Accuracy')
     ax1.legend()
     ax1.grid(True, linestyle='--', alpha=0.6)
-    
-    # 과적합 영역 강조 표시
-    for i in range(len(history.history['accuracy'])):
-        diff = history.history['accuracy'][i] - history.history['val_accuracy'][i]
-        if diff > 0.15:  # 15% 이상 차이나면 과적합 영역으로 표시
-            ax1.axvspan(i-0.5, i+0.5, alpha=0.2, color='red')
     
     # 손실 그래프
     ax2.plot(history.history['loss'], label='train')
@@ -262,29 +250,24 @@ def train_flower_classifier():
     """
     꽃 분류 모델 학습 실행
     """
-    print("과적합 방지 ResNet50 기반 꽃 분류 모델 학습을 시작합니다...")
+    print("개선된 ResNet50 기반 꽃 분류 모델 학습을 시작합니다...")
     
     # 클래스 목록 가져오기
     class_names = sorted([d for d in os.listdir(DATA_DIR) if os.path.isdir(os.path.join(DATA_DIR, d))])
     num_classes = len(class_names)
     print(f"발견된 꽃 클래스: {num_classes}개 - {class_names}")
     
-    # 데이터 증강 설정 - 더 강한 증강 적용
+    # 데이터 증강 설정 - ResNet50에 맞는 전처리
     train_datagen = ImageDataGenerator(
         preprocessing_function=preprocess_input,  # ResNet50 전용 전처리 함수
         validation_split=VALIDATION_SPLIT,
-        # 증강 강화
-        rotation_range=40,  # 더 큰 회전 각도
-        width_shift_range=0.3,  # 더 큰 이동
-        height_shift_range=0.3,  # 더 큰 이동
-        shear_range=0.3,  # 더 큰 전단
-        zoom_range=0.3,  # 더 큰 줌
+        rotation_range=20,
+        width_shift_range=0.2,
+        height_shift_range=0.2,
+        shear_range=0.2,
+        zoom_range=0.2,
         horizontal_flip=True,
-        vertical_flip=True,  # 수직 뒤집기 추가
-        brightness_range=[0.7, 1.3],  # 밝기 변화 추가
-        fill_mode='reflect',  # 리플렉션 모드 사용
-        # 추가 증강
-        channel_shift_range=0.2  # 색상 변형 추가
+        fill_mode='nearest'
     )
     
     # 검증 데이터는 데이터 증강 없이 전처리만 적용
@@ -323,7 +306,7 @@ def train_flower_classifier():
     
     # 모델 생성
     model, base_model = create_model(num_classes)
-    print("과적합 방지 ResNet50 기반 모델 생성 완료")
+    print("개선된 ResNet50 기반 모델 생성 완료")
     
     # 모델 요약 정보 출력
     model.summary()
@@ -331,7 +314,7 @@ def train_flower_classifier():
     # 배치당 손실 출력 콜백
     batch_loss_callback = BatchLossCallback(print_interval=5)
     
-    # 콜백 설정 - 더 빠른 조기 중단
+    # 콜백 설정
     callbacks = [
         ModelCheckpoint(
             os.path.join(MODEL_DIR, 'best_model.h5'),
@@ -342,43 +325,36 @@ def train_flower_classifier():
         ),
         EarlyStopping(
             monitor='val_loss',
-            patience=5,  # 인내심 감소로 과적합 방지
+            patience=5,  # 인내심 증가
             restore_best_weights=True,
             verbose=1
         ),
         ReduceLROnPlateau(
             monitor='val_loss',
             factor=0.5,
-            patience=3,  # 인내심 감소
+            patience=5,  # 인내심 증가
             min_lr=1e-7,
-            verbose=1
-        ),
-        # 과적합 감지 및 학습률 감소 콜백 추가
-        EarlyStopping(
-            monitor='accuracy',
-            patience=3,
-            baseline=0.85,  # 훈련 정확도가 85%를 넘으면 주의
             verbose=1
         ),
         batch_loss_callback
     ]
     
-    # 1단계: 동결 모델 학습 (더 적은 에폭)
+    # 1단계: 부분 동결 모델 학습
     print("\n[1단계] 일부 레이어 학습 중...")
     history_initial = model.fit(
         train_generator,
         steps_per_epoch=train_generator.samples // BATCH_SIZE,
         validation_data=validation_generator,
         validation_steps=validation_generator.samples // BATCH_SIZE,
-        epochs=EPOCHS // 3,  # 에폭 수 감소하여 과적합 방지
+        epochs=EPOCHS // 2,  # 절반의 에폭만 실행
         callbacks=callbacks,
         verbose=2  # 진행률 표시줄 없이 에폭당 한 줄씩 출력
     )
     
     plot_training_history(history_initial, "initial_training_history.png")
     
-    # 2단계: 미세 조정 - 더 적은 층 고정 해제 후 재학습
-    print("\n[2단계] 미세 조정 - 특징 추출기 일부 학습 중...")
+    # 2단계: 미세 조정 - 더 많은 층 고정 해제 후 재학습
+    print("\n[2단계] 미세 조정 - 특징 추출기 더 많은 부분 학습 중...")
     model = unfreeze_model(model, base_model)
     
     # 미세 조정 단계의 학습률은 더 낮게 설정
@@ -387,7 +363,7 @@ def train_flower_classifier():
         steps_per_epoch=train_generator.samples // BATCH_SIZE,
         validation_data=validation_generator,
         validation_steps=validation_generator.samples // BATCH_SIZE,
-        epochs=EPOCHS // 3,  # 에폭 수 감소
+        epochs=EPOCHS // 2,  # 나머지 절반의 에폭 실행
         callbacks=callbacks,
         verbose=2  # 진행률 표시줄 없이 에폭당 한 줄씩 출력
     )
@@ -447,16 +423,6 @@ def train_flower_classifier():
     test_loss, test_acc = model.evaluate(validation_generator, verbose=1)
     print(f"\n최종 테스트 정확도: {test_acc:.4f}")
     print(f"최종 테스트 손실: {test_loss:.4f}")
-    
-    # 과적합 정도 계산 - 최종 훈련 정확도와 검증 정확도의 차이
-    final_train_acc = history_fine_tuning.history['accuracy'][-1]
-    overfitting_gap = final_train_acc - test_acc
-    print(f"과적합 정도: {overfitting_gap:.4f} ({overfitting_gap*100:.1f}%)")
-    
-    if overfitting_gap > 0.1:
-        print("[경고] 여전히 과적합이 있습니다. 더 강한 정규화나 데이터 증강을 고려하세요.")
-    else:
-        print("[양호] 과적합이 효과적으로 제어되었습니다.")
     
     print(f"\n모델 학습 완료! 모델이 {os.path.abspath(MODEL_DIR)} 폴더에 저장되었습니다.")
     print(f"클래스 목록: {class_names_ordered}")

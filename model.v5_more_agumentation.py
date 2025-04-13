@@ -14,6 +14,21 @@ import seaborn as sns
 import pandas as pd
 import time
 
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    print("GPU 목록:", gpus)
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        # 논리적 GPU 장치 생성
+        tf.config.set_visible_devices(gpus[0], 'GPU')
+        print(f"GPU {gpus[0].name}를 사용합니다.")
+    except RuntimeError as e:
+        print(e)
+else:
+    print("GPU를 찾을 수 없습니다. CPU에서 실행합니다.")
+
+
 # GPU 메모리 증가 방지
 physical_devices = tf.config.list_physical_devices('GPU')
 if physical_devices:
@@ -33,8 +48,8 @@ os.makedirs(PLOT_DIR, exist_ok=True)
 # 설정 값
 IMG_SIZE = 224  # ResNet50의 표준 입력 크기
 BATCH_SIZE = 32
-EPOCHS = 30
-INITIAL_LEARNING_RATE = 0.0001  # 학습률 감소
+EPOCHS = 60
+INITIAL_LEARNING_RATE = 0.00005  # 학습률 감소
 VALIDATION_SPLIT = 0.2
 
 # 각 배치마다 손실 및 정확도 출력을 위한 커스텀 콜백
@@ -154,9 +169,17 @@ def unfreeze_model(model, base_model):
     for layer in base_model.layers[-50:]:
         layer.trainable = True
     
+    # 더 낮은 기본 학습률로 새로운 스케줄러 생성
+    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate=INITIAL_LEARNING_RATE / 10,
+        decay_steps=2000,
+        decay_rate=0.95,
+        staircase=True
+    )
+
     # 더 낮은 학습률로 다시 컴파일
     model.compile(
-        optimizer=Adam(learning_rate=INITIAL_LEARNING_RATE / 10),
+        optimizer=Adam(learning_rate=lr_schedule),
         loss='categorical_crossentropy',
         metrics=['accuracy']
     )
@@ -244,14 +267,17 @@ def train_flower_classifier():
     
     # 데이터 증강 설정 - ResNet50에 맞는 전처리
     train_datagen = ImageDataGenerator(
-        preprocessing_function=preprocess_input,  # ResNet50 전용 전처리 함수
+        preprocessing_function=preprocess_input,
         validation_split=VALIDATION_SPLIT,
-        rotation_range=20,
-        width_shift_range=0.2,
-        height_shift_range=0.2,
-        shear_range=0.2,
-        zoom_range=0.2,
+        rotation_range=30,  # 증가
+        width_shift_range=0.3,  # 증가
+        height_shift_range=0.3,  # 증가
+        brightness_range=[0.8, 1.2],  # 추가
+        shear_range=0.3,  # 증가
+        zoom_range=0.3,  # 증가
+        channel_shift_range=0.3,  # 추가 - 색상 변화
         horizontal_flip=True,
+        vertical_flip=True,  # 추가
         fill_mode='nearest'
     )
     
@@ -310,7 +336,7 @@ def train_flower_classifier():
         ),
         EarlyStopping(
             monitor='val_loss',
-            patience=10,  # 인내심 증가
+            patience=5,  # 인내심 증가
             restore_best_weights=True,
             verbose=1
         ),

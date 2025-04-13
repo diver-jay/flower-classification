@@ -1,3 +1,8 @@
-flower-classification/*
+# Dataset
 korean_flowers_dataset/*
 processed_flowers_dataset/*
+
+# Outputs
+results/*
+flower_model_resnet50_improved/*
+training_plots_resnet50_improved/*
